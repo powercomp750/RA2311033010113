@@ -712,3 +712,53 @@ The original implementation was a straightforward loop that processed everything
 
 ---
 
+
+# Stage 6 — Priority Notifications
+
+## Approach
+
+Not all notifications are equally important. A placement opportunity is more time-sensitive than a general event announcement. To surface the most relevant notifications first, we assign each one a priority score based on two factors:
+
+1. **Type Weight** — Placements carry more weight than Results, which in turn carry more weight than Events.
+
+2. **Recency** — Newer notifications should rank higher than older ones, all else being equal.
+
+---
+
+## Algorithm
+
+The scoring formula is:
+
+    score = (type_weight * 10) + recency
+
+Where `type_weight` is a numeric value assigned to each notification type (e.g., Placement = 3, Result = 2, Event = 1), and `recency` is derived from how recently the notification was created.
+
+The steps are:
+
+1. Fetch the user's notifications from the API.
+2. Compute a priority score for each notification using the formula above.
+3. Sort by score in descending order.
+4. Return the top 10.
+
+---
+
+## Efficiency
+
+A straightforward sort gives us O(n log n) complexity. However, since we only need the top 10 results, we can do better.
+
+---
+
+## Maintaining Top 10 Efficiently
+
+Instead of sorting the entire list, use a min-heap of size 10. As each notification comes in, insert it into the heap. If the heap grows beyond 10 elements, remove the one with the lowest score. At the end, the heap contains exactly the 10 highest-scoring notifications.
+
+This brings the complexity down to O(n log k), where k = 10 — essentially O(n) in practice. It also works well in a streaming context, where new notifications arrive continuously and you need to maintain a live top-10 list without re-sorting everything.
+
+---
+
+## Summary
+
+Priority scoring combines notification type importance with recency to surface the most relevant items first. A min-heap approach makes the top-k selection efficient and well-suited for real-time systems where notifications arrive continuously.
+
+---
+
