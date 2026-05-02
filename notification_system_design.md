@@ -463,3 +463,97 @@ The original query was both structurally incorrect (wrong table) and inefficient
 
 ---
 
+
+# Stage 4 — Performance Optimization & Caching Strategy
+
+## Problem
+
+As it stands, notifications are fetched from the database on every single page load for every student. This creates three problems: high read load on the database, increased response latency, and a noticeably sluggish experience for users.
+
+---
+
+## Goals
+
+* Cut down the number of direct database reads.
+* Bring response times down to near-instant for common requests.
+* Keep the data reasonably fresh so students are not seeing stale notifications.
+
+---
+
+## Proposed Solutions
+
+### 1. Caching with Redis
+
+The idea is simple: cache each user's recent notifications and their unread count in Redis. When a request comes in, check Redis first. If the data is there, return it immediately. If not, query the database, return the result, and store it in Redis for next time.
+
+This brings response times close to O(1) and dramatically reduces database load. The trade-off is that cached data can become slightly stale, so a good cache invalidation strategy is essential.
+
+---
+
+### 2. Lazy Loading with Pagination
+
+Rather than loading all notifications at once, fetch only the first 10 or 20 and load more as the user scrolls. This keeps the initial page load fast and reduces the query size. The downside is that it requires additional API calls as the user scrolls further.
+
+---
+
+### 3. Real-Time Push via WebSockets
+
+Instead of having the client poll the server repeatedly, push new notifications to the client the moment they are created. This eliminates redundant fetching and gives users genuinely real-time updates. However, it adds architectural complexity — the server needs to maintain persistent connections with every active client.
+
+---
+
+### 4. Background Processing with Queues
+
+For bulk notification scenarios (such as sending a placement alert to 50,000 students), offload the heavy lifting to a message queue like Kafka or RabbitMQ. Workers pick jobs off the queue and process them asynchronously, which keeps the API responsive during large broadcasts. The trade-off is additional infrastructure to manage.
+
+---
+
+### 5. Denormalization (Optional)
+
+In our schema, the `is_read` flag already lives in the `user_notifications` mapping table, which avoids an extra join. If read patterns show that certain fields are always fetched together, we can consider storing them in a single denormalized table. This reduces join overhead at the cost of some data redundancy.
+
+---
+
+### 6. CDN / Edge Caching (Optional)
+
+For notification content that does not change frequently, edge caching can speed up delivery for geographically distributed users. This is less useful for highly dynamic data like unread counts, but it can help for things like static announcement details.
+
+---
+
+## Cache Invalidation Strategy
+
+The cache needs to stay in sync with the source of truth. Three rules handle this:
+
+* When a new notification is created, update (or invalidate) the relevant user caches.
+* When a notification is marked as read, update the cached unread count.
+* Set a TTL of 1 to 5 minutes on cached entries as a safety net, so even if an invalidation is missed, the data self-corrects within a short window.
+
+---
+
+## Comparison of Approaches
+
+| Strategy   | Performance | Complexity | Best Suited For |
+| ---------- | ----------- | ---------- | --------------- |
+| Caching    | High        | Medium     | Frequent reads  |
+| Pagination | Medium      | Low        | Large datasets  |
+| WebSockets | High        | High       | Real-time apps  |
+| Queues     | High        | High       | Bulk processing |
+
+---
+
+## Final Recommendation
+
+The most practical starting point is a combination of three strategies:
+
+* **Redis caching** as the primary optimization — it gives the biggest performance win for the least effort.
+* **Pagination** to keep query sizes manageable regardless of data volume.
+* **WebSockets** added later for real-time delivery once the core system is stable.
+
+---
+
+## Summary
+
+The key insight is to avoid hitting the database on every page load. Caching and pagination together handle the vast majority of read traffic. Real-time push (via WebSockets) can be layered on once the infrastructure supports persistent connections. The goal throughout is to balance performance improvements against system complexity.
+
+---
+
