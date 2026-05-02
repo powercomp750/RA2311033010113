@@ -347,3 +347,119 @@ Use a message queue like Kafka or RabbitMQ to handle bulk notification creation 
 PostgreSQL is a solid choice here because of its consistency guarantees and mature tooling. The three-table schema cleanly separates concerns and supports efficient broadcasting. With proper indexing, cursor-based pagination, caching, and partitioning, the system can scale comfortably to millions of records.
 
 ---
+
+
+# Stage 3 — Query Optimization & Indexing
+
+## Given Query
+
+```sql
+SELECT *
+FROM notifications
+WHERE studentID = 1042 AND isRead = false
+ORDER BY createdAt DESC;
+```
+
+---
+
+## Is this query accurate?
+
+Not quite. In our schema, the read status (`is_read`) lives in the `user_notifications` table, not in `notifications` directly. So the correct version needs a JOIN between the two tables.
+
+---
+
+## Why is this query slow?
+
+There are four main reasons:
+
+**1. No Index Usage** — Filtering on `studentID` and `isRead` without any indexes forces the database to perform a full table scan.
+
+**2. Sorting Over Large Data** — `ORDER BY createdAt DESC` on millions of rows is an expensive sort operation.
+
+**3. SELECT \*** — Fetching every column, including ones the client does not need, increases I/O and memory usage.
+
+**4. Large Dataset** — With over 5 million notifications, any unoptimized query will struggle.
+
+---
+
+## Optimized Query
+
+```sql
+SELECT n.id, n.type, n.message, n.created_at
+FROM notifications n
+JOIN user_notifications un 
+  ON n.id = un.notification_id
+WHERE un.user_id = 1042 
+  AND un.is_read = false
+ORDER BY n.created_at DESC
+LIMIT 20;
+```
+
+---
+
+## Improvements Made
+
+* Uses the correct schema with a JOIN instead of querying a single flat table.
+* Limits the result set with `LIMIT`, so the database stops scanning as soon as it finds enough rows.
+* Selects only the columns the client actually needs, reducing data transfer.
+* Combined with proper indexes, the scan size drops dramatically.
+
+---
+
+## Recommended Indexes
+
+```sql
+CREATE INDEX idx_user_read 
+ON user_notifications(user_id, is_read);
+```
+
+```sql
+CREATE INDEX idx_created_at 
+ON notifications(created_at DESC);
+```
+
+The composite index on `(user_id, is_read)` lets the database quickly find unread notifications for a specific user. The descending index on `created_at` speeds up the ORDER BY clause.
+
+---
+
+## Computation Cost
+
+| Version   | Complexity                    |
+| --------- | ----------------------------- |
+| Original  | O(N log N) (full scan + sort) |
+| Optimized | O(log N + K)                  |
+
+Here, N is the total number of rows, and K is the result size (which stays small thanks to the LIMIT clause).
+
+---
+
+## Should we index every column?
+
+No, and here is why:
+
+* Every index slows down INSERT and UPDATE operations because the database has to maintain the index structure alongside the data.
+* Indexes consume storage, and most of them will never be used if they do not correspond to actual query patterns.
+
+The right approach is to index only the fields that appear frequently in query filters and sort clauses — in this case, `user_id`, `is_read`, and `created_at`.
+
+---
+
+## Query: Placement Notifications (Last 7 Days)
+
+```sql
+SELECT DISTINCT un.user_id
+FROM notifications n
+JOIN user_notifications un 
+  ON n.id = un.notification_id
+WHERE n.type = 'Placement'
+  AND n.created_at >= NOW() - INTERVAL '7 days';
+```
+
+---
+
+## Summary
+
+The original query was both structurally incorrect (wrong table) and inefficient (full scan, no limit). The optimized version uses the proper schema, adds targeted indexes, and limits the result set. The general principle is to index selectively — only the columns that your queries actually filter or sort on.
+
+---
+
