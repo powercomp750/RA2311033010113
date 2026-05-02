@@ -557,3 +557,158 @@ The key insight is to avoid hitting the database on every page load. Caching and
 
 ---
 
+# Stage 5 — Reliable & Scalable Notification Delivery
+
+## Given Implementation
+
+```pseudo
+function notify_all(student_ids, message):
+  for student_id in student_ids:
+    send_email(student_id, message)
+    save_to_db(student_id, message)
+    push_to_app(student_id, message)
+```
+
+---
+
+## Shortcomings
+
+This implementation has several serious problems:
+
+**1. Sequential Processing** — It processes users one at a time. For 50,000 students, this means every email, database write, and push notification happens in series. That is painfully slow.
+
+**2. No Fault Tolerance** — If `send_email` fails halfway through the list, the system has no record of which users were successfully notified and which were not.
+
+**3. No Retry Mechanism** — If email delivery fails for 200 users, those users simply never get notified. There is no mechanism to detect the failure and try again.
+
+**4. Tight Coupling** — Email, database writes, and push notifications are all tangled together in one loop. A failure in one service (say, the email provider goes down) blocks the others from completing.
+
+**5. No Parallelism** — The code does not take advantage of concurrency at all. Even if the email service and database are both available, they are never used simultaneously.
+
+---
+
+## What Happens When Email Fails for 200 Users?
+
+In the current design, the notifications for users processed before the failure will have already been sent. The 200 users where email failed will receive nothing, and the system has no way to go back and retry. The result is an inconsistent state — some students are notified, others are silently dropped.
+
+---
+
+## Improved Design
+
+### Key Principles
+
+The redesign is built around four ideas:
+
+* **Asynchronous processing** — decouple slow operations from the main request path.
+* **Retry mechanism** — automatically retry failed deliveries.
+* **Decoupled services** — let email, push, and database operations fail independently without blocking each other.
+* **Idempotent operations** — make sure retrying a delivery does not create duplicate notifications.
+
+---
+
+## Should DB Save and Email Happen Together?
+
+No. The database write is a local, reliable operation. Email delivery depends on an external service that can fail for any number of reasons — network issues, rate limits, provider outages. If you couple them together, a failed email can leave the database in an inconsistent state (or worse, a successful email with no database record).
+
+The better approach is to save to the database first, confirming that the notification exists, and then handle email delivery as a separate, asynchronous step.
+
+---
+
+## Redesigned Architecture
+
+### Step 1 — Save Notification
+
+Insert the notification into the database for all target users. This is the source of truth and must succeed before anything else happens.
+
+---
+
+### Step 2 — Push to Queue
+
+For each user, enqueue separate jobs for email delivery and push notification delivery. The queue acts as a buffer, decoupling the creation of the notification from its delivery.
+
+---
+
+### Step 3 — Worker Services
+
+Dedicated worker processes pull jobs off the queues and handle delivery. There are separate workers for email and push notifications, so a problem with one channel does not affect the other.
+
+---
+
+## Revised Pseudocode
+
+```pseudo
+function notify_all(student_ids, message):
+
+  notification_id = create_notification(message)
+
+  for student_id in student_ids:
+    save_to_db(student_id, notification_id)
+
+    enqueue("email_queue", {
+      student_id,
+      message
+    })
+
+    enqueue("push_queue", {
+      student_id,
+      message
+    })
+```
+
+---
+
+## Worker Logic (Email)
+
+```pseudo
+worker email_worker:
+
+  while true:
+    job = dequeue("email_queue")
+
+    try:
+      send_email(job.student_id, job.message)
+    except:
+      retry(job, max_attempts=3)
+```
+
+---
+
+## Worker Logic (Push)
+
+```pseudo
+worker push_worker:
+
+  while true:
+    job = dequeue("push_queue")
+    send_push_notification(job.student_id, job.message)
+```
+
+---
+
+## Key Improvements
+
+* Jobs are processed in parallel via queue workers, so throughput scales horizontally.
+* Failed deliveries are retried up to a configurable number of attempts.
+* Email, push, and database operations are fully decoupled — a failure in one does not cascade.
+* The database write happens first, so the notification always exists as a record even if delivery is delayed.
+* Adding more workers lets the system scale to handle larger user bases without redesigning anything.
+
+---
+
+## Benefits
+
+| Feature         | Improvement                              |
+| --------------- | ---------------------------------------- |
+| Reliability     | Failed jobs are retried automatically    |
+| Scalability     | Workers can be scaled out horizontally   |
+| Performance     | Async processing keeps the API fast      |
+| Fault Tolerance | Services operate independently           |
+
+---
+
+## Summary
+
+The original implementation was a straightforward loop that processed everything sequentially with no error handling. The redesigned system saves to the database first to guarantee data consistency, then delegates delivery to asynchronous workers via message queues. Retries handle transient failures, and the decoupled architecture means one broken service does not take down the rest.
+
+---
+
